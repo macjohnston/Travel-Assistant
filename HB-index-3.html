@@ -1,0 +1,251 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Hotel Booking Assistant (Free Xotelo API)</title>
+  <script src="https://unpkg.com/react@18.2.0/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- WinkNLP and Model -->
+  <script src="https://unpkg.com/wink-nlp@2.3.0/dist/wink-nlp.min.js"></script>
+  <script src="https://unpkg.com/wink-eng-lite-web-model@1.5.0/dist/wink-eng-lite-web-model.js"></script>
+  <!-- Franc for Language Detection -->
+  <script src="https://unpkg.com/franc@6.2.0/franc.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    // Expanded mock hotel data (fallback)
+    const mockHotels = [
+      { id: 1, name: "Portland Plaza", city: "Portland Oregon", price: 110, taxes: 12, fees: 8, amenities: ["Free WiFi", "Breakfast"] },
+      { id: 2, name: "Rose City Inn", city: "Portland Oregon", price: 130, taxes: 15, fees: 10, amenities: ["Gym", "Pet Friendly"] },
+      { id: 3, name: "Parisian Charm", city: "Paris", price: 120, taxes: 15, fees: 10, amenities: ["Free WiFi", "Breakfast"] },
+      { id: 4, name: "Louvre Retreat", city: "Paris", price: 140, taxes: 18, fees: 12, amenities: ["Gym", "City View"] },
+      { id: 5, name: "Downtown Inn", city: "New York", price: 200, taxes: 25, fees: 15, amenities: ["Pool", "Free Parking"] }
+    ];
+
+    // Initialize WinkNLP
+    const wink = window.winkNLP;
+    const model = window.winkEngLiteWebModel;
+    const nlp = wink(model);
+
+    // Parse user input with NLP
+    async function parseUserInput(input) {
+      const lang = franc(input); // Detect language
+      console.log("Detected language:", lang);
+
+      let message = "";
+      if (lang === 'spa') {
+        message = "Detecté español. Procesando tu consulta... ";
+      }
+
+      // Extract entities with WinkNLP
+      const doc = nlp.readDoc(input);
+      const entities = doc.entities().out(wink.its.detail);
+      
+      let city = entities.find(e => e.type === 'LOCATION')?.value || null;
+      let budget = entities.find(e => e.type === 'NUMBER' || e.type === 'MONEY')?.value || Infinity;
+
+      // Fallback regex for city and budget
+      if (!city) {
+        const cityMatch = input.toLowerCase().match(/(?:in\s+|\b)([a-z\s]+)(?:hotel|under|$)/i);
+        city = cityMatch ? cityMatch[1].trim() : null;
+      }
+      if (budget === Infinity) {
+        const budgetMatch = input.match(/(?:under|below|less than)\s+\$?(\d+)/i);
+        budget = budgetMatch ? parseInt(budgetMatch[1]) : Infinity;
+      }
+
+      console.log("Parsed city:", city, "Parsed budget:", budget);
+
+      if (!city) {
+        return { 
+          message: lang === 'spa' ? "Por favor especifica una ciudad (ejemplo: 'hotel en Portland Oregon bajo $200')." : 
+                  "Please specify a city (e.g., 'hotel in Portland Oregon under $200').", 
+          results: [] 
+        };
+      }
+
+      // Try Xotelo API for live data
+      const hotelKey = localStorage.getItem('xoteloHotelKey');
+      if (hotelKey) {
+        try {
+          const today = new Date().toISOString().split('T')[0];
+          const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
+          const response = await fetch(
+            `https://data.xotelo.com/api/rates?hotel_key=${hotelKey}&chk_in=${today}&chk_out=${tomorrow}&currency=USD&rooms=1&adults=1`,
+            { method: 'GET' }
+          );
+          const data = await response.json();
+          
+          if (data.error) {
+            console.error("Xotelo API error:", data.error);
+            // Fallback to mock data
+          } else {
+            const results = data.result.rates
+              .filter(rate => rate.rate <= budget)
+              .map(rate => ({
+                name: rate.name || "Hotel via Xotelo",
+                price: rate.rate,
+                taxes: 0, // Xotelo doesn't split taxes/fees; assume 0 for simplicity
+                fees: 0,
+                amenities: ["Unknown"] // Limited amenity data
+              }));
+            if (results.length > 0) {
+              return {
+                message: `${message}Found ${results.length} hotel(s) in ${city} under $${budget} (live data):`,
+                results
+              };
+            }
+          }
+        } catch (error) {
+          console.error("Xotelo API fetch error:", error);
+        }
+      }
+
+      // Fallback to mock data
+      const results = mockHotels.filter(hotel => {
+        const totalPrice = hotel.price + hotel.taxes + hotel.fees;
+        return (!city || hotel.city.toLowerCase().includes(city.toLowerCase())) && totalPrice <= budget;
+      });
+
+      if (results.length === 0) {
+        return { 
+          message: `${message}No hotels found in ${city} under $${budget}. Try a higher budget or different city.`, 
+          results: [] 
+        };
+      }
+
+      return {
+        message: `${message}Found ${results.length} hotel(s) in ${city} under $${budget} (mock data):`,
+        results
+      };
+    }
+
+    // React Component
+    function App() {
+      const [input, setInput] = useState("");
+      const [chatHistory, setChatHistory] = useState([
+        { sender: "bot", message: "Hi! I'm your AI booking assistant. Enter a Xotelo hotel key (optional) for live data, then try: 'Find a hotel in Portland Oregon under $200' or 'Hotel en Portland Oregon bajo $200'." }
+      ]);
+      const [hotelKey, setHotelKey] = useState(localStorage.getItem('xoteloHotelKey') || "");
+
+      useEffect(() => {
+        if (hotelKey) localStorage.setItem('xoteloHotelKey', hotelKey);
+      }, [hotelKey]);
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        if (!input.trim()) return;
+
+        const response = await parseUserInput(input);
+        setChatHistory([...chatHistory, { sender: "user", message: input }, { sender: "bot", ...response }]);
+        setInput("");
+      };
+
+      return (
+        <div className="min-h-screen bg-gray-100 flex flex-col items-center p-4">
+          <h1 className="text-2xl font-bold text-blue-600 mb-4">AI Hotel Booking Assistant (Free)</h1>
+          <div className="w-full max-w-lg bg-white rounded-lg shadow-md p-4 mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Xotelo Hotel Key (optional, get from xotelo.com):
+            </label>
+            <input
+              type="text"
+              value={hotelKey}
+              onChange={(e) => setHotelKey(e.target.value)}
+              placeholder="Enter hotel key for live data"
+              className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4"
+            />
+          </div>
+          <div className="w-full max-w-lg bg-white rounded-lg shadow-md p-4">
+            <div className="h-80 overflow-y-auto mb-4 p-2 border border-gray-200 rounded">
+              {chatHistory.map((msg, index) => (
+                <div key={index} className={`mb-2 ${msg.sender === 'user' ? 'text-right' : 'text-left'}`}>
+                  <span className={`inline-block p-2 rounded-lg ${msg.sender === 'user' ? 'bg-blue-100 text-blue-800' : 'bg-gray-200 text-gray-800'}`}>
+                    {msg.message}
+                  </span>
+                  {msg.results && msg.results.length > 0 && (
+                    <div className="mt-2">
+                      {msg.results.map((hotel, i) => (
+                        <div key={i} className="border p-3 rounded-lg mb-2 bg-white">
+                          <h3 className="text-md font-semibold">{hotel.name}</h3>
+                          <p><strong>Base Price:</strong> ${hotel.price}</p>
+                          <p><strong>Taxes:</strong> ${hotel.taxes}</p>
+                          <p><strong>Fees:</strong> ${hotel.fees}</p>
+                          <p><strong>Total:</strong> ${hotel.price + hotel.taxes + hotel.fees}</p>
+                          <p><strong>Amenities:</strong> {hotel.amenities.join(", ")}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+            <form onSubmit={handleSubmit} className="flex">
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="e.g., Find a hotel in Portland Oregon under $200"
+                className="flex-grow p-2 border border-gray-300 rounded-l-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <button
+                type="submit"
+                className="bg-blue-600 text-white px-4 py-2 rounded-r-lg hover:bg-blue-700"
+              >
+                Send
+              </button>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.render(<App />, document.getElementById("root"));
+  </script>
+</body>
+</html>
